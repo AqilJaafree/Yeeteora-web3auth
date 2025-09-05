@@ -1,9 +1,12 @@
-// src/components/account/lp-positions-ui.tsx
+// Updated src/components/account/lp-positions-ui.tsx
+// Better Web3Auth connection detection
+
 "use client";
 
 import React from "react";
 import { PublicKey } from "@solana/web3.js";
 import { useWallet } from "@solana/wallet-adapter-react";
+import { useWeb3AuthConnect } from '@web3auth/modal/react'
 import { RangeBar } from "./RangeBar";
 import {
   TrendingUp,
@@ -590,8 +593,24 @@ function PositionItem({
 }
 
 export function LPPositions({ address }: LPPositionsProps) {
-  const { connected, connecting } = useWallet();
+  // Enhanced connection detection
+  const { connected: traditionalConnected, connecting: traditionalConnecting } = useWallet();
+  const { isConnected: web3AuthConnected } = useWeb3AuthConnect();
+  
   const query = useGetLPPositions({ address });
+
+  // Debug logging for Web3Auth positions
+  if (process.env.NODE_ENV === 'development') {
+    console.log('🔍 LP Positions Debug:', {
+      address: address.toString(),
+      traditionalConnected,
+      web3AuthConnected,
+      isAnyConnected: traditionalConnected || web3AuthConnected,
+      queryData: query.data ? `${query.data.size} positions` : 'No data',
+      queryLoading: query.isLoading,
+      queryError: query.isError
+    });
+  }
 
   const refreshPositions = () => {
     query.refetch();
@@ -599,6 +618,10 @@ export function LPPositions({ address }: LPPositionsProps) {
 
   // Convert Map to Array for rendering
   const positionsArray = query.data ? Array.from(query.data.entries()) : [];
+
+  // Enhanced connection status
+  const isAnyWalletConnected = traditionalConnected || web3AuthConnected;
+  const isConnecting = traditionalConnecting;
 
   return (
     <div className="lg:px-[70px] px-4 mx-auto space-y-12">
@@ -629,7 +652,7 @@ export function LPPositions({ address }: LPPositionsProps) {
         )}
 
         {/* Positions List */}
-        {!query.isLoading && connected && positionsArray.length > 0 ? (
+        {!query.isLoading && isAnyWalletConnected && positionsArray.length > 0 ? (
           <div>
             {/* Desktop Table Header (lg and above) */}
             <div className="hidden lg:block">
@@ -671,7 +694,7 @@ export function LPPositions({ address }: LPPositionsProps) {
         ) : null}
 
         {/* Empty State */}
-        {!query.isLoading && connected && positionsArray.length === 0 && (
+        {!query.isLoading && isAnyWalletConnected && positionsArray.length === 0 && (
           <div className="rounded-lg shadow-sm p-8 text-center">
             <TrendingUp className="w-12 h-12 text-white mx-auto mb-4" />
             <h3 className="text-lg font-medium text-white mb-2">
@@ -684,7 +707,7 @@ export function LPPositions({ address }: LPPositionsProps) {
         )}
 
         {/* Not Connected State */}
-        {!connected && !connecting && (
+        {!isAnyWalletConnected && !isConnecting && (
           <div className="rounded-lg shadow-sm p-8 text-center">
             <Wallet className="w-12 h-12 text-white mx-auto mb-4" />
             <h3 className="text-lg font-medium text-white mb-2">

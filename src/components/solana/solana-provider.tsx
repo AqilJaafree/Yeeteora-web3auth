@@ -1,5 +1,5 @@
-// Enhanced version of src/components/solana/solana-provider.tsx
-// with better account page integration - ESLint clean
+// Fixed src/components/solana/solana-provider.tsx
+// Better wallet button logic to prevent dual display
 
 'use client'
 
@@ -227,21 +227,23 @@ function TraditionalWalletButton() {
   )
 }
 
-// Combined Wallet Button with Better State Management
+// FIXED: Combined Wallet Button with Better State Management
 export function WalletButton() {
   const { isConnected: web3AuthConnected } = useWeb3AuthConnect()
   const { connected: traditionalConnected } = useWallet()
 
-  // Show appropriate wallet button based on connection state
+  // Priority: Show only one wallet type at a time
+  // 1. If Web3Auth is connected, show only Web3Auth button
   if (web3AuthConnected) {
     return <Web3AuthWalletButton />
   }
   
+  // 2. If traditional wallet is connected, show only traditional button
   if (traditionalConnected) {
     return <TraditionalWalletButton />
   }
 
-  // Both disconnected - show both options
+  // 3. If neither is connected, show both options
   return (
     <div className="flex items-center gap-2">
       <Web3AuthWalletButton />
