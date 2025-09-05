@@ -1,26 +1,44 @@
+// Updated src/components/account/account-detail-feature.tsx
 'use client'
 
 import { PublicKey } from '@solana/web3.js'
 import { useMemo } from 'react'
 import { useParams } from 'next/navigation'
-// import { ExplorerLink } from '../cluster/cluster-ui'
 import { AccountTokens } from './account-ui'
 import { ProfileStatsCard } from './profile-stats-card'
-// import { AppHero } from '../app-hero'
-// import { ellipsify } from '@/lib/utils'
+import { AccountWalletSection } from '@/components/solana/solana-provider'
+import { useEnhancedWallet } from '@/hooks/useEnhancedWallet'
 
 export default function AccountDetailFeature() {
   const params = useParams()
+  const enhancedWallet = useEnhancedWallet()
+  
   const address = useMemo(() => {
     if (!params.address) {
-      return
+      return enhancedWallet.publicKey // Use connected wallet if no address in params
     }
     try {
       return new PublicKey(params.address)
     } catch (e) {
       console.log(`Invalid public key`, e)
+      return enhancedWallet.publicKey // Fallback to connected wallet
     }
-  }, [params])
+  }, [params, enhancedWallet.publicKey])
+
+  if (!address && !enhancedWallet.isConnected) {
+    return (
+      <div className='lg:mt-[80px] mt-[40px] space-y-20'>
+        {/* Profile Stats Card - Empty state */}
+        <ProfileStatsCard />
+        
+        {/* Wallet Connection Section */}
+        <div className="lg:px-[70px] px-4">
+          <AccountWalletSection />
+        </div>
+      </div>
+    )
+  }
+
   if (!address) {
     return <div>Error loading account</div>
   }
@@ -30,15 +48,15 @@ export default function AccountDetailFeature() {
       {/* Profile Stats Card */}
       <ProfileStatsCard />
       
-      {/* Mobile-optimized Hero Section */}
-      {/* <div className="px-4 py-6 space-y-6">
-        <AccountBalance address={address} /> 
-        <AccountButtons address={address} /> 
-      </div> */}
+      {/* Wallet Connection Status */}
+      {enhancedWallet.isConnected && (
+        <div className="lg:px-[70px] px-4">
+          <AccountWalletSection />
+        </div>
+      )}
 
-      {/* Main Content */}
-        <AccountTokens address={address} />
-        {/* <AccountTransactions address={address} /> */}
+      {/* Main Content - LP Positions */}
+      <AccountTokens address={address} />
     </div>
   )
 }

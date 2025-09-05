@@ -2,12 +2,13 @@
 'use client'
 
 import { useState } from 'react'
-import { useConnection, useWallet } from '@solana/wallet-adapter-react'
-import { PublicKey, Connection } from '@solana/web3.js'
+import { useConnection } from '@solana/wallet-adapter-react'
+import { PublicKey, Connection, Transaction, VersionedTransaction } from '@solana/web3.js'
 import { useQuery } from '@tanstack/react-query'
 import DLMM from '@meteora-ag/dlmm'
 import BN from 'bn.js'
 import { toast } from 'sonner'
+import { useEnhancedWallet } from '@/hooks/useEnhancedWallet'
 
 // Import the actual types from DLMM library
 import type { PositionInfo } from '@meteora-ag/dlmm'
@@ -46,7 +47,35 @@ export type PositionType = {
 // Use the actual PositionInfo type from DLMM library
 export type LBPairPositionInfo = PositionInfo
 
-// Remove the utility function entirely - we don't need to log RPC URLs
+// Type helper to handle transaction compatibility issues
+type TransactionLike = Transaction | VersionedTransaction
+
+// Helper function to handle different transaction types safely
+function ensureTransactionFields(
+  tx: TransactionLike, 
+  blockInfo: { blockhash: string; lastValidBlockHeight: number },
+  feePayer: PublicKey
+): void {
+  try {
+    // Type guard to check if it's a legacy Transaction
+    if ('recentBlockhash' in tx && 'lastValidBlockHeight' in tx && 'feePayer' in tx) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (tx as any).recentBlockhash = blockInfo.blockhash
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tx as any).lastValidBlockHeight = blockInfo.lastValidBlockHeight
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(tx as any).feePayer = feePayer
+    }
+    // For VersionedTransaction, properties are handled differently
+    else if ('message' in tx) {
+      // VersionedTransaction handling - these fields are set during construction
+      // We'll rely on the DLMM library to handle this properly
+    }
+  } catch (error) {
+    console.warn('Transaction field setting warning:', error)
+    // Continue execution as the enhanced wallet should handle this
+  }
+}
 
 // Hook to get all LP positions for a wallet using the working sample pattern
 export function useGetLPPositions({ address }: { address: PublicKey }) {
@@ -177,7 +206,7 @@ export function useGetLPPositions({ address }: { address: PublicKey }) {
   })
 }
 
-// Hook for position actions (close and claim)
+// Enhanced hook for position actions using the unified wallet system
 export function usePositionActions(
   lbPairAddress: string,
   pos: PositionType,
@@ -185,15 +214,24 @@ export function usePositionActions(
 ) {
   const [closing, setClosing] = useState(false)
   const [claiming, setClaiming] = useState(false)
-  const { publicKey, sendTransaction } = useWallet()
   const { connection } = useConnection()
+  
+  // Use the enhanced wallet hook that supports both traditional and Web3Auth wallets
+  const enhancedWallet = useEnhancedWallet()
 
   const handleCloseAndWithdraw = async () => {
-    if (!publicKey) return
+    if (!enhancedWallet.isConnected || !enhancedWallet.publicKey) {
+      toast.error('Please connect your wallet', {
+        description: 'Connect either a traditional Solana wallet or use social login'
+      })
+      return
+    }
+
     setClosing(true)
+    
     try {
       const posKey = pos.publicKey
-      const user = publicKey
+      const user = enhancedWallet.publicKey
       const lowerBinId = Number(pos.positionData.lowerBinId)
       const upperBinId = Number(pos.positionData.upperBinId)
       
@@ -202,37 +240,105 @@ export function usePositionActions(
         ? new Connection(customRpcUrl, { commitment: 'confirmed' })
         : connection
 
+      // Create DLMM pool instance
       const dlmmPool = await DLMM.create(
         closeConnection,
         new PublicKey(lbPairAddress)
       )
       
+      // Create the remove liquidity transaction
       const txOrTxs = await dlmmPool.removeLiquidity({
         user,
         position: posKey,
         fromBinId: lowerBinId,
         toBinId: upperBinId,
-        bps: new BN(10000),
+        bps: new BN(10000), // 100% removal
         shouldClaimAndClose: true,
       })
       
+      // Handle both single transaction and transaction array
       if (Array.isArray(txOrTxs)) {
+        // Multiple transactions
         for (const tx of txOrTxs) {
-          await sendTransaction(tx, closeConnection)
+          // Get block info for transaction
+          const block = await closeConnection.getLatestBlockhash('confirmed')
+          
+          // Set transaction fields safely using our helper
+          ensureTransactionFields(tx as TransactionLike, block, user)
+
+          // Use the enhanced wallet's unified transaction signing
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const signature = await enhancedWallet.signAndSendTransaction(tx as any, closeConnection)
+          
+          // Confirm each transaction
+          await closeConnection.confirmTransaction({
+            signature,
+            blockhash: block.blockhash,
+            lastValidBlockHeight: block.lastValidBlockHeight
+          }, 'confirmed')
         }
       } else {
-        await sendTransaction(txOrTxs, closeConnection)
+        // Single transaction
+        const block = await closeConnection.getLatestBlockhash('confirmed')
+        
+        // Set transaction fields safely using our helper
+        ensureTransactionFields(txOrTxs as TransactionLike, block, user)
+
+        // Use the enhanced wallet's unified transaction signing
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const signature = await enhancedWallet.signAndSendTransaction(txOrTxs as any, closeConnection)
+        
+        // Confirm transaction
+        await closeConnection.confirmTransaction({
+          signature,
+          blockhash: block.blockhash,
+          lastValidBlockHeight: block.lastValidBlockHeight
+        }, 'confirmed')
       }
       
-      toast.success("Your position has been closed and your funds have been withdrawn.")
+      toast.success("Position Closed Successfully!", {
+        description: `${enhancedWallet.walletType === 'web3auth' ? 'Social Login' : 'Traditional Wallet'} • Your funds have been withdrawn`,
+        action: {
+          label: 'View Details',
+          onClick: () => {
+            // Could link to explorer or refresh page
+            refreshPositions()
+          },
+        },
+      })
       
       // Add delay to allow blockchain state to update before refreshing
       setTimeout(() => {
         refreshPositions()
-      }, 10000)
+      }, 3000)
+      
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      toast.error("Failed to close position: " + errorMessage)
+      
+      // Enhanced error handling for different wallet types
+      if (enhancedWallet.walletType === 'web3auth') {
+        if (errorMessage.includes('User rejected') || errorMessage.includes('user denied')) {
+          toast.warning('Transaction Cancelled', {
+            description: 'You cancelled the transaction in your social wallet.'
+          })
+          return
+        }
+      }
+      
+      // Common error messages
+      if (errorMessage.includes('insufficient funds') || errorMessage.includes('insufficient lamports')) {
+        toast.error('Insufficient Funds', {
+          description: 'You need more SOL to complete this transaction.'
+        })
+      } else if (errorMessage.includes('Failed to initialize DLMM pool')) {
+        toast.error('Pool Connection Failed', {
+          description: 'Unable to connect to the liquidity pool. Please try refreshing.'
+        })
+      } else {
+        toast.error("Failed to close position", {
+          description: errorMessage
+        })
+      }
       
       // Only log detailed error in development
       if (process.env.NODE_ENV === 'development') {
@@ -244,23 +350,34 @@ export function usePositionActions(
   }
 
   const handleClaimFees = async () => {
-    if (!publicKey) return
+    if (!enhancedWallet.isConnected || !enhancedWallet.publicKey) {
+      toast.error('Please connect your wallet', {
+        description: 'Connect either a traditional Solana wallet or use social login'
+      })
+      return
+    }
+
     setClaiming(true)
+    
     try {
       const posKey = pos.publicKey
-      const user = publicKey
+      const user = enhancedWallet.publicKey
       
       const customRpcUrl = process.env.NEXT_PUBLIC_SOLANA_RPC_URL || connection.rpcEndpoint
       const closeConnection = customRpcUrl !== connection.rpcEndpoint
         ? new Connection(customRpcUrl, { commitment: 'confirmed' })
         : connection
 
+      // Create DLMM pool instance
       const dlmmPool = await DLMM.create(
         closeConnection,
         new PublicKey(lbPairAddress)
       )
       
+      // Get position data
       const position = await dlmmPool.getPosition(posKey)
+      
+      // Create claim fees transaction
       const tx = await dlmmPool.claimSwapFee({
         owner: user,
         position,
@@ -268,24 +385,76 @@ export function usePositionActions(
       
       if (tx) {
         if (Array.isArray(tx)) {
+          // Multiple transactions
           for (const transaction of tx) {
-            await sendTransaction(transaction, closeConnection)
+            const block = await closeConnection.getLatestBlockhash('confirmed')
+            
+            // Set transaction fields safely
+            ensureTransactionFields(transaction as TransactionLike, block, user)
+
+            // Use enhanced wallet signing with type casting
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const signature = await enhancedWallet.signAndSendTransaction(transaction as any, closeConnection)
+            
+            await closeConnection.confirmTransaction({
+              signature,
+              blockhash: block.blockhash,
+              lastValidBlockHeight: block.lastValidBlockHeight
+            }, 'confirmed')
           }
         } else {
-          await sendTransaction(tx, closeConnection)
+          // Single transaction
+          const block = await closeConnection.getLatestBlockhash('confirmed')
+          
+          // Set transaction fields safely
+          ensureTransactionFields(tx as TransactionLike, block, user)
+
+          // Use enhanced wallet signing with type casting
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const signature = await enhancedWallet.signAndSendTransaction(tx as any, closeConnection)
+          
+          await closeConnection.confirmTransaction({
+            signature,
+            blockhash: block.blockhash,
+            lastValidBlockHeight: block.lastValidBlockHeight
+          }, 'confirmed')
         }
-        toast.success("Your fees have been claimed.")
+        
+        toast.success("Fees Claimed Successfully!", {
+          description: `${enhancedWallet.walletType === 'web3auth' ? 'Social Login' : 'Traditional Wallet'} • Your fees have been claimed`,
+        })
         
         // Add delay to allow blockchain state to update before refreshing
         setTimeout(() => {
           refreshPositions()
-        }, 10000)
+        }, 3000)
       } else {
-        toast.error("You don't have any fees to claim.")
+        toast.error("No fees to claim", {
+          description: "You don't have any unclaimed fees for this position."
+        })
       }
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      toast.error("Failed to claim fees: " + errorMessage)
+      
+      // Enhanced error handling for different wallet types
+      if (enhancedWallet.walletType === 'web3auth') {
+        if (errorMessage.includes('User rejected') || errorMessage.includes('user denied')) {
+          toast.warning('Transaction Cancelled', {
+            description: 'You cancelled the transaction in your social wallet.'
+          })
+          return
+        }
+      }
+      
+      if (errorMessage.includes('insufficient funds') || errorMessage.includes('insufficient lamports')) {
+        toast.error('Insufficient Funds', {
+          description: 'You need more SOL to complete this transaction.'
+        })
+      } else {
+        toast.error("Failed to claim fees", {
+          description: errorMessage
+        })
+      }
       
       // Only log detailed error in development
       if (process.env.NODE_ENV === 'development') {
@@ -301,6 +470,8 @@ export function usePositionActions(
     claiming,
     handleCloseAndWithdraw,
     handleClaimFees,
-    publicKey,
+    walletType: enhancedWallet.walletType,
+    isConnected: enhancedWallet.isConnected,
+    publicKey: enhancedWallet.publicKey,
   }
 }

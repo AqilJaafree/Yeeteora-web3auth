@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import Image from "next/image";
 import { useGetLPPositions, usePositionActions, type PositionType, type LBPairPositionInfo } from './lp-positions-data-access';
+import { WalletButton } from '@/components/solana/solana-provider';
 import type { PositionInfo } from '@meteora-ag/dlmm';
 
 interface LPPositionsProps {
@@ -193,12 +194,14 @@ function PositionItem({
   const pool = positionInfo.lbPair;
   const { tokenXMeta, tokenYMeta } = useTokenMeta(pool);
   
-  // Use shared hook for actions
+  // Use enhanced position actions hook that supports both wallet types
   const {
     closing,
     claiming,
     handleCloseAndWithdraw,
     handleClaimFees,
+    walletType,
+    isConnected,
     publicKey,
   } = usePositionActions(lbPairAddress, pos, refreshPositions);
   
@@ -223,11 +226,10 @@ function PositionItem({
     return `$${num.toFixed(2)}`;
   };
 
-  // Determine strategy for the position (similar to Meteora strategy filter)
+  // Determine strategy for the position
   const getPositionStrategy = (): string | null => {
     const SOL_MINT = 'So11111111111111111111111111111111111111112'
     
-    // Check if it's a SOL pair
     const tokenXMint = pool.tokenXMint && typeof (pool.tokenXMint as { toBase58?: () => string }).toBase58 === 'function'
       ? (pool.tokenXMint as { toBase58: () => string }).toBase58()
       : pool.tokenXMint
@@ -241,11 +243,10 @@ function PositionItem({
       return 'One Sided'
     }
     
-    // Return null if no specific strategy applies
     return null
   }
 
-  // Token pair display with icons matching Meteora design
+  // Token pair display with icons
   const TokenPairDisplay = () => (
     <div className="flex flex-col items-start gap-3">
       <div className="flex flex-col items-start gap-3">
@@ -277,9 +278,6 @@ function PositionItem({
               ? `${tokenXMeta.symbol} / ${tokenYMeta.symbol}`
               : "Loading..."}
           </div>
-          {/* <div className="text-sm text-muted-foreground font-serif">
-            {lbPairAddress.slice(0, 8)}...{lbPairAddress.slice(-8)}
-          </div> */}
           {getPositionStrategy() && (
             <div className="mt-1">
               <div className="text-primary font-medium font-serif text-xs bg-secondary-foreground px-2 py-1 rounded-[8px] inline-block">
@@ -291,6 +289,56 @@ function PositionItem({
       </div>
     </div>
   );
+
+  // Enhanced action buttons with wallet type awareness
+  const ActionButtons = ({ isMobile = false }: { isMobile?: boolean }) => {
+    if (!isConnected) {
+      return (
+        <div className={`flex ${isMobile ? 'justify-center gap-2 pt-2 border-t border-border/30' : 'items-center justify-center'}`}>
+          <div className="text-center">
+            <p className="text-xs text-muted-foreground mb-2">Connect wallet to manage position</p>
+            <div className="flex gap-2">
+              <WalletButton />
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    const buttonClass = isMobile ? "flex-1" : ""
+    const containerClass = isMobile 
+      ? "flex justify-center gap-2 pt-2 border-t border-border/30" 
+      : "flex items-center justify-center"
+
+    return (
+      <div className={containerClass}>
+        <div className={isMobile ? "flex gap-2 w-full" : "flex flex-col gap-2"}>
+          <Button
+            variant="secondary"
+            className={buttonClass}
+            onClick={handleClaimFees}
+            disabled={claiming || !publicKey}
+          >
+            {claiming ? "CLAIMING..." : "CLAIM FEES"}
+          </Button>
+          <Button
+            className={buttonClass}
+            onClick={handleCloseAndWithdraw}
+            disabled={closing || !publicKey}
+          >
+            {closing ? "CLOSING..." : "CLOSE POSITION"}
+          </Button>
+          
+          {/* Show wallet type indicator */}
+          {isConnected && (
+            <div className={`text-xs text-muted-foreground ${isMobile ? 'text-center mt-1' : 'mt-2'}`}>
+              {walletType === 'web3auth' ? '🔗 Social Login' : '🔐 Traditional Wallet'}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   // Shared balance display for responsive
   const BalanceDisplay = ({ showIcons = false, size = "text-lg" }: { showIcons?: boolean; size?: string }) => (
@@ -378,8 +426,6 @@ function PositionItem({
     </>
   );
 
-
-  // Return the new Meteora-style layout regardless of viewMode
   return (
     <>
       {/* Desktop Table Row (lg and above) */}
@@ -451,24 +497,7 @@ function PositionItem({
           </div>
 
           {/* Action Buttons Column */}
-          <div className="flex items-center justify-center">
-            <div className="flex flex-col gap-2">
-              <Button
-                variant="secondary"
-                onClick={handleClaimFees}
-                disabled={claiming || !publicKey}
-              >
-                {claiming ? "CLAIMING..." : "CLAIM FEES"}
-              </Button>
-              <Button
-                
-                onClick={handleCloseAndWithdraw}
-                disabled={closing || !publicKey}
-              >
-                {closing ? "CLOSING..." : "CLOSE POSITION"}
-              </Button>
-            </div>
-          </div>
+          <ActionButtons />
         </div>
       </div>
 
@@ -511,18 +540,15 @@ function PositionItem({
                     ? `${tokenXMeta.symbol} / ${tokenYMeta.symbol}`
                     : "Loading..."}
                 </div>
-                {/* <div className="text-xs text-muted-foreground font-serif">
-                  {lbPairAddress.slice(0, 8)}...{lbPairAddress.slice(-8)}
-                </div> */}
               </div>
             </div>
             {getPositionStrategy() && (
-            <div className="mt-1">
-              <div className="text-primary font-medium font-serif text-xs bg-secondary-foreground px-2 py-1 rounded-[8px] inline-block">
-                {getPositionStrategy()}
+              <div className="mt-1">
+                <div className="text-primary font-medium font-serif text-xs bg-secondary-foreground px-2 py-1 rounded-[8px] inline-block">
+                  {getPositionStrategy()}
+                </div>
               </div>
-            </div>
-          )}
+            )}
           </div>
 
           {/* Two Column Grid for Key Metrics */}
@@ -555,24 +581,8 @@ function PositionItem({
             <RangeBar min={minPrice} max={maxPrice} current={currentPrice} />
           </div>
 
-          {/* Action Buttons */}
-          <div className="flex justify-center gap-2 pt-2 border-t border-border/30">
-            <Button
-              variant="secondary" 
-              className="flex-1"
-              onClick={handleClaimFees}
-              disabled={claiming || !publicKey}
-            >
-              {claiming ? "CLAIMING..." : "CLAIM FEES"}
-            </Button>
-            <Button
-            className="flex-1"
-              onClick={handleCloseAndWithdraw}
-              disabled={closing || !publicKey}
-            >
-              {closing ? "CLOSING..." : "CLOSE POSITION"}
-            </Button>
-          </div>
+          {/* Action Buttons for Mobile */}
+          <ActionButtons isMobile={true} />
         </div>
       </div>
     </>
@@ -582,7 +592,6 @@ function PositionItem({
 export function LPPositions({ address }: LPPositionsProps) {
   const { connected, connecting } = useWallet();
   const query = useGetLPPositions({ address });
-  // Remove the old viewMode since we're using the new unified layout
 
   const refreshPositions = () => {
     query.refetch();
