@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useGetBalance } from '../account/account-data-access'
+import { useEnhancedWallet } from '@/hooks/useEnhancedWallet'
 
 // Import Meteora DLMM SDK
 import DLMM, { StrategyType } from '@meteora-ag/dlmm'
@@ -33,16 +34,25 @@ interface AddLPPositionProps {
 
 export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositionProps) {
   const { connection } = useConnection()
-  const { publicKey, sendTransaction } = useWallet()
+  const { sendTransaction } = useWallet()
+  
+  // Enhanced wallet hook that supports both traditional and Web3Auth wallets
+  const enhancedWallet = useEnhancedWallet()
+  
+  // Traditional wallet hook for balance checking (works with both wallet types)
+  const { publicKey: walletPublicKey } = useWallet()
+  
   const [isOpen, setIsOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [solAmount, setSolAmount] = useState('')
   const [showStrategyInfo, setShowStrategyInfo] = useState(false)
-  // const [showNotesInfo, setShowNotesInfo] = useState(false)
 
-  // Get wallet balance
-  const balanceQuery = useGetBalance({ address: publicKey || new PublicKey('11111111111111111111111111111111') })
-  const walletBalanceSOL = balanceQuery.data && publicKey ? balanceQuery.data / LAMPORTS_PER_SOL : 0
+  // Get wallet balance - use the public key from either wallet type
+  const activePublicKey = enhancedWallet.publicKey || walletPublicKey
+  const balanceQuery = useGetBalance({ 
+    address: activePublicKey || new PublicKey('11111111111111111111111111111111') 
+  })
+  const walletBalanceSOL = balanceQuery.data && activePublicKey ? balanceQuery.data / LAMPORTS_PER_SOL : 0
 
   // Function to set percentage of wallet balance
   const setPercentageAmount = (percentage: number) => {
@@ -62,19 +72,19 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
 
   // Polling-based confirmation method
   const confirmTransactionWithPolling = async (signature: string, maxRetries = 30): Promise<boolean> => {
-    console.log('Starting transaction confirmation with polling...')
+    console.log('🔄 Starting transaction confirmation with polling...')
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         const status = await connection.getSignatureStatus(signature, { searchTransactionHistory: true })
 
-        console.log(`Attempt ${attempt + 1}: Transaction status:`, status.value)
+        console.log(`📊 Attempt ${attempt + 1}: Transaction status:`, status.value)
 
         if (status.value?.confirmationStatus === 'confirmed' || status.value?.confirmationStatus === 'finalized') {
           if (status.value.err) {
             throw new Error(`Transaction failed: ${JSON.stringify(status.value.err)}`)
           }
-          console.log('Transaction confirmed successfully!')
+          console.log('✅ Transaction confirmed successfully!')
           return true
         }
 
@@ -85,7 +95,7 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
         // Wait 2 seconds before next attempt
         await new Promise((resolve) => setTimeout(resolve, 2000))
       } catch (error) {
-        console.warn(`Confirmation attempt ${attempt + 1} failed:`, error)
+        console.warn(`⚠️ Confirmation attempt ${attempt + 1} failed:`, error)
 
         // If it's the last attempt, throw the error
         if (attempt === maxRetries - 1) {
@@ -101,8 +111,11 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
   }
 
   const handleAddPosition = async () => {
-    if (!publicKey || !sendTransaction) {
-      toast.error('Please connect your wallet')
+    // Check if any wallet is connected using the enhanced wallet hook
+    if (!enhancedWallet.isConnected || !enhancedWallet.publicKey || !enhancedWallet.canTransact) {
+      toast.error('Please connect your wallet', {
+        description: 'Connect either a traditional Solana wallet or use social login'
+      })
       return
     }
 
@@ -114,16 +127,18 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
     setIsLoading(true)
 
     try {
-      console.log('Creating DLMM pool instance...')
+      console.log('🚀 Creating DLMM pool instance...')
+      console.log('💼 Wallet Type:', enhancedWallet.walletType)
+      console.log('🔑 Public Key:', enhancedWallet.publicKey.toBase58())
 
       // Create DLMM pool instance
       const dlmmPool = await DLMM.create(connection, new PublicKey(pairAddress))
 
-      console.log('Getting active bin...')
+      console.log('📍 Getting active bin...')
       // Get active bin information
       const activeBin = await dlmmPool.getActiveBin()
 
-      console.log('Active bin:', activeBin)
+      console.log('🎯 Active bin:', activeBin)
 
       // Check which token is SOL
       const SOL_MINT = 'So11111111111111111111111111111111111111112'
@@ -134,26 +149,24 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
         throw new Error('This pair does not contain SOL')
       }
 
-      console.log('SOL token detected:', isTokenXSOL ? 'Token X' : 'Token Y')
+      console.log('💰 SOL token detected:', isTokenXSOL ? 'Token X' : 'Token Y')
 
-      // FIXED: Calculate range for one-sided BidAsk position - exactly 69 bins
+      // Calculate range for one-sided BidAsk position - exactly 69 bins
       const NUM_BINS = 69
       let minBinId: number
       let maxBinId: number
 
       if (isTokenXSOL) {
         // SOL is Token X - place bins ABOVE current price for one-sided position
-        // This creates a "bid" side where SOL is only used when price goes up
         minBinId = activeBin.binId + 1 // Start 1 bin above current price
         maxBinId = minBinId + (NUM_BINS - 1) // Exactly 69 bins total
       } else {
         // SOL is Token Y - place bins BELOW current price for one-sided position
-        // This creates an "ask" side where SOL is only used when price goes down
         maxBinId = activeBin.binId - 1 // End 1 bin below current price
         minBinId = maxBinId - (NUM_BINS - 1) // Exactly 69 bins total
       }
 
-      console.log('One-sided BidAsk position range:', {
+      console.log('📊 One-sided BidAsk position range:', {
         minBinId,
         maxBinId,
         activeBinId: activeBin.binId,
@@ -175,7 +188,7 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
         totalYAmount = solInLamports // All SOL goes to Y
       }
 
-      console.log('Position amounts:', {
+      console.log('💵 Position amounts:', {
         totalXAmount: totalXAmount.toString(),
         totalYAmount: totalYAmount.toString(),
         isTokenXSOL,
@@ -184,58 +197,126 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
 
       // Generate new position keypair
       const newPosition = new Keypair()
-      console.log('New position address:', newPosition.publicKey.toString())
+      console.log('🆔 New position address:', newPosition.publicKey.toString())
 
-      // Create one-sided liquidity position with BidAsk strategy and FIXED bin range
-      console.log('Creating BidAsk position transaction...')
+      // Create one-sided liquidity position with BidAsk strategy
+      console.log('📝 Creating BidAsk position transaction...')
       const createPositionTx = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
         positionPubKey: newPosition.publicKey,
-        user: publicKey,
+        user: enhancedWallet.publicKey,
         totalXAmount,
         totalYAmount,
         strategy: {
           maxBinId,
           minBinId,
-          strategyType: StrategyType.BidAsk, // Keep BidAsk for asymmetric one-sided distribution
+          strategyType: StrategyType.BidAsk,
         },
       })
 
-      console.log('Sending transaction...')
+      console.log('📤 Sending transaction...')
 
-      // Send transaction
-      const signature = await sendTransaction(createPositionTx, connection, {
-        signers: [newPosition],
-      })
+      // 🔥 SIMPLIFIED: Handle transaction signing without type conflicts
+      let signature: string
 
-      console.log('Transaction sent:', signature)
+      if (enhancedWallet.walletType === 'traditional') {
+        // For traditional wallets, use the standard sendTransaction
+        if (!sendTransaction) {
+          throw new Error('Traditional wallet sendTransaction not available')
+        }
+        signature = await sendTransaction(createPositionTx, connection, {
+          signers: [newPosition],
+        })
+      } else {
+        // For Web3Auth wallets, convert transaction and use direct signing
+        try {
+          // Pre-sign with the position keypair
+          createPositionTx.partialSign(newPosition)
+          
+          // Set required transaction fields for Web3Auth
+          if (!createPositionTx.recentBlockhash) {
+            const block = await connection.getLatestBlockhash("finalized")
+            createPositionTx.recentBlockhash = block.blockhash
+            createPositionTx.lastValidBlockHeight = block.lastValidBlockHeight
+          }
+          if (!createPositionTx.feePayer) {
+            createPositionTx.feePayer = enhancedWallet.publicKey
+          }
+          
+          // Use Web3Auth signing - cast through unknown to avoid type conflicts
+          const web3AuthTransaction = createPositionTx as unknown as Parameters<typeof enhancedWallet.signAndSendTransaction>[0]
+          signature = await enhancedWallet.signAndSendTransaction(web3AuthTransaction, connection)
+        } catch (web3AuthError) {
+          console.error('Web3Auth transaction error:', web3AuthError)
+          throw web3AuthError
+        }
+      }
 
-      // Use polling-based confirmation instead of WebSocket subscription
-      console.log('Confirming transaction with polling method...')
+      console.log('✅ Transaction sent:', signature)
+
+      // Use polling-based confirmation
+      console.log('⏳ Confirming transaction with polling method...')
       await confirmTransactionWithPolling(signature)
 
-      console.log('Position address:', newPosition.publicKey.toString())
+      console.log('🎉 Position created successfully!')
+      console.log('📍 Position address:', newPosition.publicKey.toString())
 
       // Close modal on success
       setIsOpen(false)
       setSolAmount('')
 
-      // Show success toast
+      // Show success toast with wallet type info
       toast.success('LP Position Created Successfully!', {
-        description: `Transaction: ${signature.slice(0, 8)}...${signature.slice(-8)}`,
+        description: `${enhancedWallet.walletType === 'web3auth' ? 'Social Login' : 'Traditional Wallet'} • ${signature.slice(0, 8)}...${signature.slice(-8)}`,
         action: {
           label: 'View Transaction',
           onClick: () => window.open(`https://explorer.solana.com/tx/${signature}`, '_blank'),
         },
       })
     } catch (err: unknown) {
-      console.error('Error creating LP position:', err)
-      toast.error('Failed to create LP position', {
-        description: err instanceof Error ? err.message : 'Please try again later',
-      })
+      console.error('💥 Error creating LP position:', err)
+      
+      // Enhanced error handling for different wallet types
+      let errorMessage = 'Unknown error'
+      
+      if (err instanceof Error) {
+        errorMessage = err.message
+        
+        // Specific error handling for Web3Auth
+        if (enhancedWallet.walletType === 'web3auth') {
+          if (errorMessage.includes('User rejected') || errorMessage.includes('user denied')) {
+            toast.warning('Transaction Cancelled', {
+              description: 'You cancelled the transaction in your social wallet.'
+            })
+            return
+          }
+        }
+        
+        // Common error messages
+        if (errorMessage.includes('insufficient funds') || errorMessage.includes('insufficient lamports')) {
+          toast.error('Insufficient Funds', {
+            description: 'You need more SOL to complete this transaction.'
+          })
+        } else if (errorMessage.includes('Failed to initialize DLMM pool')) {
+          toast.error('Pool Connection Failed', {
+            description: 'Unable to connect to the liquidity pool. Please try refreshing.'
+          })
+        } else {
+          toast.error('Failed to create LP position', {
+            description: errorMessage
+          })
+        }
+      } else {
+        toast.error('Failed to create LP position', {
+          description: 'An unexpected error occurred. Please try again.'
+        })
+      }
     } finally {
       setIsLoading(false)
     }
   }
+
+  // Check if any wallet is connected
+  const isAnyWalletConnected = enhancedWallet.isConnected
 
   return (
     <Dialog open={isOpen} onOpenChange={setIsOpen}>
@@ -249,6 +330,11 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
       <DialogContent className="sm:max-w-[420px] gradient-card flex flex-col bg-background">
         <DialogHeader className="pb-2 flex-shrink-0">
           <DialogTitle className="flex items-center gap-3 text-xl">Add Liquidity to {pairName}</DialogTitle>
+          {enhancedWallet.isConnected && (
+            <p className="text-sm text-muted-foreground">
+              Connected via {enhancedWallet.walletType === 'web3auth' ? 'Social Login' : 'Traditional Wallet'}
+            </p>
+          )}
         </DialogHeader>
 
         <div className="space-y-6 px-1 overflow-y-auto flex-1 min-h-0">
@@ -275,6 +361,16 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
             )}
           </div>
 
+          {/* Wallet Connection Status */}
+          {!isAnyWalletConnected && (
+            <div className="bg-yellow-500/20 border border-yellow-500/50 rounded-lg p-3">
+              <div className="flex items-center gap-2 text-yellow-200 text-sm">
+                <Info className="h-4 w-4 flex-shrink-0" />
+                <span>Please connect your wallet to continue</span>
+              </div>
+            </div>
+          )}
+
           {/* Position Form */}
           <div className="space-y-4">
             {/* SOL Amount */}
@@ -283,7 +379,7 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
                 <Label htmlFor="solAmount" className="text-sm font-medium flex items-center gap-2">
                   SOL Amount
                 </Label>
-                {publicKey && balanceQuery.data && (
+                {activePublicKey && balanceQuery.data && (
                   <span className="text-xs text-sub-text font-serif">Balance: {walletBalanceSOL.toFixed(3)} SOL</span>
                 )}
               </div>
@@ -297,10 +393,11 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
                 min="0.02"
                 step="0.01"
                 className="text-sm py-3 px-4 rounded-[8px]"
+                disabled={!isAnyWalletConnected}
               />
 
               {/* Percentage Buttons */}
-              {publicKey && walletBalanceSOL > 0.02 && (
+              {activePublicKey && walletBalanceSOL > 0.02 && (
                 <div className="grid grid-cols-4 gap-2">
                   {[25, 50, 75, 100].map((percentage) => {
                     const amount = (walletBalanceSOL * percentage) / 100
@@ -313,7 +410,7 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
                         variant="secondary"
                         size="sm"
                         onClick={() => setPercentageAmount(percentage)}
-                        disabled={finalAmount < 0.02}
+                        disabled={finalAmount < 0.02 || !isAnyWalletConnected}
                         className="text-xs h-8 border-primary"
                       >
                         {percentage}%
@@ -332,9 +429,17 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
           </div>
 
           <div className='text-xs font-serif flex flex-col gap-1'>
-            <span className='text-sub-text'>SOL needed to create 1 positions:</span>
+            <span className='text-sub-text'>SOL needed to create 1 position:</span>
             <span>0.057456080 SOL (Refundable)</span>
           </div>
+
+          {/* Wallet Type Info */}
+          {enhancedWallet.isConnected && (
+            <div className="text-xs text-muted-foreground bg-muted/20 p-3 rounded-lg">
+              <p>✅ Wallet connected via {enhancedWallet.walletType === 'web3auth' ? 'Social Login' : 'Traditional Wallet'}</p>
+              <p className="mt-1 font-mono">{enhancedWallet.publicKey?.toBase58().slice(0, 8)}...{enhancedWallet.publicKey?.toBase58().slice(-8)}</p>
+            </div>
+          )}
         </div>
 
         <DialogFooter className="pt-6 border-t border-border/20 px-1 flex-shrink-0 mt-auto">
@@ -344,7 +449,7 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
             </Button>
             <Button
               onClick={handleAddPosition}
-              disabled={isLoading || !publicKey}
+              disabled={isLoading || !enhancedWallet.canTransact}
               className="flex-1 gradient-primary border-0 text-white hover:opacity-90 py-3"
             >
               {isLoading ? (
@@ -352,6 +457,10 @@ export function AddLPPosition({ pairAddress, pairName, isSOLPair }: AddLPPositio
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                   Creating...
                 </div>
+              ) : !isAnyWalletConnected ? (
+                'Connect Wallet First'
+              ) : !enhancedWallet.canTransact ? (
+                'Wallet Not Ready'
               ) : (
                 <div className="flex items-center gap-2">
                   <Plus className="w-4 h-4" />
